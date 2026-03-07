@@ -396,3 +396,126 @@ Set via `dcc.Interval(interval=5000)` in `dashboard.py`. Change the value (in mi
 ### 7.4 Mock Producer Interval
 
 Set `PUBLISH_INTERVAL = 5` in `mock_producer.py` (seconds between each round of publishing). Decrease to stress-test the pipeline; increase for lower-frequency simulation.
+
+---
+
+## 8. Running the Pipeline
+
+> **All four steps run in separate terminal windows.** The order matters — infrastructure must be up before producers start, and Spark must be running before the dashboard has meaningful data.
+
+### Step 1 — Start the Infrastructure
+
+```bash
+docker compose up -d
+```
+
+This starts all 10 services. Wait ~60–90 seconds for everything to become healthy. You can verify with:
+
+```bash
+docker compose ps
+```
+
+All services should show `Up` status. If `hive-metastore` keeps restarting, see [Troubleshooting](#101-hive-metastore-startup-failure).
+
+**Useful service UIs once running:**
+
+| Service | URL |
+|---|---|
+| Kafka (no UI by default) | `localhost:29092` |
+| HDFS NameNode Web UI | http://localhost:50070 |
+| Spark Master Web UI | http://localhost:8080 |
+| Spark Worker Web UI | http://localhost:8081 |
+| HiveServer2 | `localhost:10000` (Beeline/JDBC) |
+
+### Step 2 — Start the Spark Trend Analyzer
+
+The Spark job must be submitted into the running Spark container so it can resolve `kafka:9092` and `namenode:9000` via Docker's internal DNS:
+
+```bash
+docker exec -it spark-master /opt/spark/bin/spark-submit \
+  --master spark://spark-master:7077 \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 \
+  /path/to/spark_trend_analyzer.py
+```
+
+> **Note on `--packages`:** The Kafka connector JAR is not bundled with the base Spark image. The `--packages` flag downloads it from Maven Central on first run. This requires internet access from inside the container. Subsequent runs use the cached JAR.
+
+Alternatively, copy the script into the container first:
+
+```bash
+docker cp spark_trend_analyzer.py spark-master:/opt/spark/
+docker exec -it spark-master /opt/spark/bin/spark-submit \
+  --master spark://spark-master:7077 \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 \
+  /opt/spark/spark_trend_analyzer.py
+```
+
+You should see `Hive table 'default.stock_trends' ready.` and then `Streaming started. Waiting for data...`
+
+### Step 3 — Start the Data Producer
+
+**Option A: Live data (requires Alpaca API key)**
+```bash
+source venv/bin/activate
+python alpaca_producer.py
+```
+
+Expected output:
+```
+2025-03-06 10:00:01 INFO Starting Alpaca real-time stream for: ['AAPL', 'TSLA', ...]
+2025-03-06 10:00:05 INFO [AAPL] close=175.23 | change=+0.12% | dir=up | vol=124,500
+```
+
+**Option B: Mock data (no API key needed)**
+```bash
+source venv/bin/activate
+python mock_producer.py
+```
+
+Expected output:
+```
+2025-03-06 10:00:01 INFO Mock producer started → topic 'alpaca_trends' every 5s
+2025-03-06 10:00:06 INFO AAPL  | close=  175.30 | up   +0.17% | vol=  187,432 | bias=+0.0012
+```
+
+### Step 4 — Start the Dashboard
+
+```bash
+source venv/bin/activate
+python dashboard.py
+```
+
+Open [http://localhost:8050](http://localhost:8050) in your browser. After one full 5-minute window of data accumulates, charts will begin populating. Signal badges appear as soon as the first Spark result arrives in the `alpaca_trend_results` topic.
+
+### Stopping the Pipeline
+
+```bash
+# Stop producers and dashboard: Ctrl+C in each terminal
+
+# Stop all Docker containers (preserves data volumes)
+docker compose stop
+
+# Stop and delete containers + volumes (full reset)
+docker compose down -v
+```
+
+### Quick-Start Summary
+
+```bash
+# Terminal 1
+docker compose up -d && docker compose ps
+
+# Terminal 2 — Spark
+docker cp spark_trend_analyzer.py spark-master:/opt/spark/
+docker exec -it spark-master /opt/spark/bin/spark-submit \
+  --master spark://spark-master:7077 \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 \
+  /opt/spark/spark_trend_analyzer.py
+
+# Terminal 3 — Producer
+source venv/bin/activate && python mock_producer.py
+
+# Terminal 4 — Dashboard
+source venv/bin/activate && python dashboard.py
+# → open http://localhost:8050
+```
