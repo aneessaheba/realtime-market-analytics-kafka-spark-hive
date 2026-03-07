@@ -1,0 +1,18 @@
+# Kafka client
+kafka-python==2.0.2
+
+# Alpaca market data streaming SDK
+alpaca-py==0.26.0
+
+# PySpark (match your cluster version)
+pyspark==3.5.0
+
+# Dashboard
+dash==2.17.1
+plotly==5.22.0
+
+# Data processing
+pandas==2.2.2
+
+# Environment variable loading
+python-dotenv==1.0.1
