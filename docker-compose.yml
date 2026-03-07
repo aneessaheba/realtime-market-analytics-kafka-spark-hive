@@ -1,0 +1,177 @@
+services:
+  # ----------------------------
+  # Zookeeper + Kafka
+  # ----------------------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: "2181"
+      ZOOKEEPER_TICK_TIME: "2000"
+    ports:
+      - "2181:2181"
+    restart: unless-stopped
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "29092:29092"  # host access (your laptop)
+      - "9092:9092"    # internal docker network access
+    environment:
+      KAFKA_BROKER_ID: "1"
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    restart: unless-stopped
+
+  # ----------------------------
+  # HDFS (NameNode + DataNode) - MATCH Hive's Hadoop 2.7.4
+  # ----------------------------
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop2.7.4-java8
+    container_name: namenode
+    environment:
+      CLUSTER_NAME: "bigdata"
+      CORE_CONF_fs_defaultFS: "hdfs://namenode:9000"
+      HDFS_CONF_dfs_replication: "1"
+    ports:
+      - "50070:50070"  # NameNode UI
+      - "9000:9000"    # HDFS
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+    restart: unless-stopped
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop2.7.4-java8
+    container_name: datanode
+    depends_on:
+      - namenode
+    environment:
+      CORE_CONF_fs_defaultFS: "hdfs://namenode:9000"
+      HDFS_CONF_dfs_replication: "1"
+    ports:
+      - "9864:9864"  # DataNode UI
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    restart: unless-stopped
+
+  # ----------------------------
+  # HDFS Init: creates required directories for Hive
+  # ----------------------------
+  hdfs-init:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop2.7.4-java8
+    container_name: hdfs-init
+    depends_on:
+      - namenode
+      - datanode
+    environment:
+      CORE_CONF_fs_defaultFS: "hdfs://namenode:9000"
+    entrypoint: >
+      /bin/bash -c "
+        echo 'Waiting for HDFS NameNode...' &&
+        until hdfs dfs -ls / > /dev/null 2>&1; do sleep 3; done &&
+        echo 'HDFS is up. Creating Hive directories...' &&
+        hdfs dfs -mkdir -p /tmp/hive &&
+        hdfs dfs -mkdir -p /user/hive/warehouse &&
+        hdfs dfs -chmod -R 777 /tmp/hive &&
+        hdfs dfs -chmod -R 777 /user/hive/warehouse &&
+        echo 'Done.'
+      "
+    restart: "no"
+
+  # ----------------------------
+  # Hive Metastore DB (Postgres)
+  # ----------------------------
+  hive-metastore-postgresql:
+    image: bde2020/hive-metastore-postgresql:2.3.0
+    container_name: hive-metastore-postgresql
+    environment:
+      POSTGRES_DB: metastore
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive
+    volumes:
+      - metastore_db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # ----------------------------
+  # Hive Metastore (connects to Postgres)
+  # ----------------------------
+  hive-metastore:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    container_name: hive-metastore
+    depends_on:
+      - hive-metastore-postgresql
+      - namenode
+      - datanode
+      - hdfs-init
+    environment:
+      CORE_CONF_fs_defaultFS: "hdfs://namenode:9000"
+      SERVICE_PRECONDITION: "namenode:50070 hive-metastore-postgresql:5432"
+    volumes:
+      # Mount hive-site.xml directly — bypasses broken env var mechanism
+      - ./hive-site.xml:/opt/hive/conf/hive-site.xml
+    command: ["/opt/hive/bin/hive", "--service", "metastore"]
+    ports:
+      - "9083:9083"
+    restart: unless-stopped
+
+  # ----------------------------
+  # HiveServer2 (connects to same Postgres metastore)
+  # ----------------------------
+  hive-server:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    container_name: hive-server
+    depends_on:
+      - hive-metastore
+    environment:
+      CORE_CONF_fs_defaultFS: "hdfs://namenode:9000"
+      SERVICE_PRECONDITION: "hive-metastore:9083"
+    volumes:
+      # Same hive-site.xml so HiveServer2 also points to Postgres metastore
+      - ./hive-site.xml:/opt/hive/conf/hive-site.xml
+    command: ["/opt/hive/bin/hive", "--service", "hiveserver2"]
+    ports:
+      - "10000:10000"
+      - "10002:10002"
+    restart: unless-stopped
+
+  # ----------------------------
+  # Spark (apache/spark image)
+  # ----------------------------
+  spark-master:
+    image: apache/spark:3.5.0
+    container_name: spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    environment:
+      SPARK_MASTER_HOST: "spark-master"
+      SPARK_CONF_spark_hadoop_hive_metastore_uris: "thrift://hive-metastore:9083"
+    ports:
+      - "8080:8080"  # Spark Master UI
+      - "7077:7077"  # Spark Master port
+    restart: unless-stopped
+
+  spark-worker:
+    image: apache/spark:3.5.0
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    environment:
+      SPARK_CONF_spark_hadoop_hive_metastore_uris: "thrift://hive-metastore:9083"
+    ports:
+      - "8081:8081"  # Spark Worker UI
+    restart: unless-stopped
+
+volumes:
+  namenode_data:
+  datanode_data:
+  metastore_db_data:
