@@ -287,3 +287,112 @@ Overrides the container's default Hive configuration to point at the external Po
 - `javax.jdo.option.ConnectionURL` — JDBC URL to Postgres
 - `hive.metastore.uris` — Thrift address for Spark to connect to
 - `hive.server2.enable.doAs=false` — disables user impersonation (required in Docker where UIDs don't match)
+
+---
+
+## 6. Setup & Prerequisites
+
+### 6.1 System Requirements
+
+| Requirement | Recommended |
+|---|---|
+| RAM | 12 GB free (Docker containers are memory-hungry) |
+| CPU | 4+ cores |
+| Disk | 10 GB free for Docker images and HDFS data |
+| OS | macOS, Linux, or Windows with WSL2 |
+| Docker | Docker Desktop 4.x or Docker Engine 24+ |
+| Python | 3.10 or 3.11 |
+
+### 6.2 Install Docker and Docker Compose
+
+```bash
+# macOS (using Homebrew)
+brew install --cask docker
+
+# Verify
+docker --version
+docker compose version
+```
+
+On Linux, follow the [official Docker Engine install guide](https://docs.docker.com/engine/install/) and install the `docker-compose-plugin`.
+
+### 6.3 Get an Alpaca API Key
+
+1. Sign up at [https://app.alpaca.markets](https://app.alpaca.markets) (free paper-trading account)
+2. Navigate to **API Keys** in the dashboard
+3. Click **Generate New Key** — you receive an `API Key ID` and `Secret Key`
+4. **Important:** Copy the secret immediately; Alpaca only shows it once
+
+> The free Alpaca tier provides access to real-time IEX data. For full SIP (consolidated) data, a subscription is required. For this project, IEX data is sufficient.
+
+### 6.4 Clone the Repository
+
+```bash
+git clone https://github.com/aneessaheba/realtime-market-analytics-kafka-spark-hive.git
+cd realtime-market-analytics-kafka-spark-hive
+```
+
+### 6.5 Configure Environment Variables
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` and fill in your values:
+
+```env
+ALPACA_API_KEY=PKXXXXXXXXXXXXXXXXXX
+ALPACA_API_SECRET=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+KAFKA_BROKER=localhost:29092
+SYMBOLS=AAPL,TSLA,GOOGL,MSFT,AMZN
+```
+
+`.env` is listed in `.gitignore` and will never be committed.
+
+### 6.6 Install Python Dependencies
+
+```bash
+python3 -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 6.7 Pull Docker Images
+
+This step downloads ~8 GB of Docker images. Run it once in advance to avoid delays when starting the stack:
+
+```bash
+docker compose pull
+```
+
+---
+
+## 7. Configuration
+
+### 7.1 Kafka Topics
+
+| Topic | Producer | Consumer | Description |
+|---|---|---|---|
+| `alpaca_trends` | `alpaca_producer.py` / `mock_producer.py` | `spark_trend_analyzer.py` | Raw preprocessed bar records |
+| `alpaca_trend_results` | `spark_trend_analyzer.py` | `dashboard.py` | Windowed aggregates + trend signals |
+
+Topics are auto-created by Kafka (`KAFKA_AUTO_CREATE_TOPICS_ENABLE=true`). No manual topic creation is required.
+
+### 7.2 Spark Window Parameters
+
+Configured in `spark_trend_analyzer.py`:
+
+| Parameter | Value | Description |
+|---|---|---|
+| Window duration | 5 minutes | Each window covers 5 min of bar data |
+| Slide duration | 1 minute | Windows are re-evaluated every 1 min |
+| Watermark | 2 minutes | Late events within 2 min are still accepted |
+| Hive trigger | Every 1 minute | How often Spark flushes Parquet to HDFS |
+
+### 7.3 Dashboard Refresh
+
+Set via `dcc.Interval(interval=5000)` in `dashboard.py`. Change the value (in milliseconds) to adjust refresh rate. Faster refresh uses more CPU; 5000ms is a good balance for streaming data.
+
+### 7.4 Mock Producer Interval
+
+Set `PUBLISH_INTERVAL = 5` in `mock_producer.py` (seconds between each round of publishing). Decrease to stress-test the pipeline; increase for lower-frequency simulation.
