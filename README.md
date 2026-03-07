@@ -822,3 +822,83 @@ docker compose up -d namenode datanode hdfs-init  # just HDFS
 **Solution:** Added an outer retry loop in `alpaca_producer.py` that catches any exception from `stream.run()` and reconnects after a `RETRY_DELAY` (default 10 seconds), up to `MAX_RETRIES` attempts.
 
 **Best practice:** All persistent WebSocket/streaming connections in production should have reconnection logic. Treat connection loss as a normal event, not an error condition.
+
+---
+
+## 11. Learning Summary & Reflections
+
+### 11.1 What We Learned
+
+**Apache Kafka**
+Kafka is not just a message queue — it is a distributed, durable, ordered log. The key insight is that Kafka topics can serve simultaneously as a pipeline transport (producer → Spark) and as a real-time API (Spark → dashboard). The decoupling this provides is profound: the dashboard does not need to know about Spark at all; it just reads from a topic. We also learned that Kafka's partitioning strategy is critical for Spark — keying messages by symbol ensures Spark can consume each symbol's stream in order, which matters for accurate window computations.
+
+**PySpark Structured Streaming**
+Structured Streaming's event-time processing model is fundamentally different from micro-batch RDD processing. The watermark-window combination is elegant but requires careful tuning — getting it wrong either loses late data (watermark too tight) or accumulates unbounded state (watermark too loose). The fact that Spark Streaming integrates seamlessly with the Hive metastore via `enableHiveSupport()` — writing Parquet to HDFS paths that Hive can immediately query — was a major insight into how the Hadoop ecosystem is designed to compose.
+
+**Apache Hive on HDFS**
+Hive is a translation layer: you write SQL, it generates MapReduce or Tez jobs. For streaming pipelines, Hive is most useful as the **read layer** — Spark writes Parquet files to HDFS, and Hive makes those files instantly queryable via standard SQL. We learned that Hive's type system has subtle differences from Spark's (e.g., `BIGINT` not `LONG`, `FLOAT` not `REAL`), and that the Postgres-backed metastore is vastly more reliable than the default Derby embedded database.
+
+**Docker Compose for Big Data**
+Orchestrating 10 containers with interdependencies taught us a great deal about service readiness, networking, and resource management. The biggest realisation was that `depends_on` in Docker Compose only waits for a container to *start*, not for the service inside it to become *ready*. For big data stacks where services like HiveServer2 can take 30+ seconds to initialise, this distinction is critical.
+
+**Plotly Dash for Real-Time Visualization**
+Dash bridges the gap between Python data processing and interactive web dashboards without requiring JavaScript. The threading model — Kafka consumer in a background thread, Dash callbacks in the main thread, shared state protected by a lock — is a clean and practical pattern for live data dashboards. One limitation is that Dash's update interval is polling-based rather than event-driven; for true push-based updates, WebSocket integration or Server-Sent Events would be needed.
+
+---
+
+### 11.2 Challenges Faced
+
+| Challenge | Impact | Resolution |
+|---|---|---|
+| Hive metastore startup race condition | High — blocked all Hive operations | `SERVICE_PRECONDITION` health polling |
+| Kafka dual-listener configuration | High — Spark couldn't connect to Kafka | Two listener protocols configured |
+| HDFS permission denied for Hive warehouse | High — no data could be stored | `hdfs-init` one-shot container |
+| Hive DDL `LONG` type error | Medium — table creation failed | Changed to `BIGINT` |
+| Spark Kafka JAR missing | Medium — Spark job wouldn't start | `--packages` on spark-submit |
+| Docker RAM exhaustion on Mac | Medium — OOM kills of containers | Raised Docker Desktop memory limit |
+| Alpaca WebSocket silent disconnects | Medium — data stream silently stopped | Retry loop with exponential backoff |
+| Output mode mismatch with sinks | Low — duplicate Parquet files | Switched to `append` with watermark |
+| API keys in source code | Security risk | Moved to `.env` + `python-dotenv` |
+| Late event data loss | Low — minor inaccuracy | Watermark increased to 2 minutes |
+
+---
+
+### 11.3 Insights Gained
+
+**On streaming vs. batch:**
+Real-time streaming is fundamentally harder than batch processing because you cannot see the full dataset before computing. Windowing, watermarks, and output modes are all compensations for this fundamental uncertainty. Batch processing's luxury of global knowledge is entirely absent in streaming.
+
+**On the value of decoupling:**
+The most powerful design decision in this pipeline is the use of Kafka as a buffer between every stage. Because each component only knows about its Kafka topics, any stage can be replaced, upgraded, or scaled independently. This is the core value proposition of a streaming pipeline over point-to-point integrations.
+
+**On the complexity of distributed systems:**
+Getting 10 containers to start in the right order, with correct network connectivity, correct filesystem permissions, and correct configuration — all on a laptop — gave a concrete appreciation for why production Hadoop clusters require dedicated infrastructure teams. Tools like Kubernetes, Helm charts, and managed cloud services (Confluent Cloud, AWS MSK, Databricks) exist precisely to abstract away this operational complexity.
+
+**On the Alpaca API:**
+Alpaca provides a free, real-time market data stream with a clean Python SDK. The bar data structure (OHLCV + VWAP) is rich enough to compute meaningful technical indicators. The WebSocket approach is far better than polling a REST API for real-time data — it eliminates API rate-limit concerns and reduces latency.
+
+**On metric design:**
+The `buy_pressure` metric (fraction of up-ticks) proved surprisingly informative. When combined with `volatility` and `vwap_deviation_pct`, it creates a multi-dimensional view of market state. A stock with high buy pressure and low VWAP deviation is accumulating quietly; high buy pressure with high VWAP deviation suggests momentum overbought conditions.
+
+---
+
+## 12. Future Improvements
+
+| Feature | Description | Priority |
+|---|---|---|
+| RSI indicator | Implement 14-period Relative Strength Index in Spark | High |
+| Moving averages | EMA-20 and SMA-50 for trend confirmation | High |
+| Alert system | Kafka-based alert topic: push BULLISH/BEARISH signal changes to email or Slack | Medium |
+| Historical backfill | Use Alpaca's REST bars endpoint to seed Hive with 1-year historical data for context | Medium |
+| Grafana dashboard | Replace Plotly Dash with Grafana + Kafka data source for richer charting and alerting | Medium |
+| Schema Registry | Add Confluent Schema Registry to enforce Avro schemas on Kafka topics | Medium |
+| Kubernetes deployment | Convert Docker Compose to Helm chart for cloud deployment (GKE, EKS) | Low |
+| Unit tests | Add pytest tests for `preprocess_bar()` and `compute_trends()` logic | Medium |
+| Sentiment overlay | Integrate Reddit/Twitter sentiment (VADER or BERT) alongside price trends | Low |
+| Portfolio simulation | Track simulated P&L from acting on BULLISH/BEARISH signals | Low |
+| Flink alternative | Re-implement the Spark job in Apache Flink for lower-latency event processing | Low |
+
+---
+
+*Built for DATA 228 — Big Data Technologies, San Jose State University.*
+*Author: Aneessa Heba Guddi*
