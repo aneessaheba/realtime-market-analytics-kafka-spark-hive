@@ -1,0 +1,52 @@
+# Environment variables — never commit real API keys
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Spark checkpoints and temp data
+/tmp/
+spark-warehouse/
+derby.log
+metastore_db/
+
+# Logs
+*.log
+logs/
+
+# Docker volumes (local bind mounts if any)
+data/
+volumes/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
