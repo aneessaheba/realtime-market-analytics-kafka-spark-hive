@@ -2,8 +2,8 @@ import sys
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, from_json, to_json, struct, window,
-    avg, max, min, stddev, count,
-    when, round as spark_round
+    avg, max, min, stddev, count, sum as spark_sum,
+    when, round as spark_round, lit
 )
 from pyspark.sql.types import (
     StructType, StructField, StringType,
@@ -62,21 +62,41 @@ def read_from_kafka(spark):
 
 
 def compute_trends(df):
-    return (
+    agg_df = (
         df.withWatermark("event_time", "2 minutes")
         .groupBy(
             window(col("event_time"), "5 minutes", "1 minute"),
             col("symbol")
         )
         .agg(
-            spark_round(avg("close"),    4).alias("avg_close"),
-            spark_round(max("close"),    4).alias("max_close"),
-            spark_round(min("close"),    4).alias("min_close"),
-            spark_round(avg("volume"),   0).alias("avg_volume"),
-            spark_round(stddev("close"), 4).alias("volatility"),
+            spark_round(avg("close"),        4).alias("avg_close"),
+            spark_round(max("close"),        4).alias("max_close"),
+            spark_round(min("close"),        4).alias("min_close"),
+            spark_round(avg("volume"),       0).alias("avg_volume"),
+            spark_round(stddev("close"),     4).alias("volatility"),
+            spark_round(avg("vwap"),         4).alias("avg_vwap"),
+            spark_round(avg("pct_change"),   4).alias("avg_pct_change"),
+            # buy pressure: fraction of bars where price moved up
+            spark_round(
+                spark_sum(when(col("direction") == "up", lit(1)).otherwise(lit(0))) /
+                count("*"),
+                4
+            ).alias("buy_pressure"),
             count("*").alias("bar_count"),
         )
+    )
+
+    return (
+        agg_df
         .withColumn("price_range", spark_round(col("max_close") - col("min_close"), 4))
+        # VWAP deviation: % difference between avg close and avg VWAP
+        .withColumn(
+            "vwap_deviation_pct",
+            spark_round(
+                (col("avg_close") - col("avg_vwap")) / col("avg_vwap") * 100,
+                4
+            )
+        )
         .withColumn(
             "trend_signal",
             when(col("avg_close") > col("min_close") + (col("price_range") * 0.6), "BULLISH")
@@ -130,17 +150,21 @@ def write_to_hive(df):
 def ensure_hive_table(spark):
     spark.sql(f"""
         CREATE TABLE IF NOT EXISTS {HIVE_TABLE} (
-            symbol       STRING,
-            window_start STRING,
-            window_end   STRING,
-            avg_close    DOUBLE,
-            max_close    DOUBLE,
-            min_close    DOUBLE,
-            avg_volume   DOUBLE,
-            volatility   DOUBLE,
-            bar_count    BIGINT,
-            price_range  DOUBLE,
-            trend_signal STRING
+            symbol             STRING,
+            window_start       STRING,
+            window_end         STRING,
+            avg_close          DOUBLE,
+            max_close          DOUBLE,
+            min_close          DOUBLE,
+            avg_volume         DOUBLE,
+            volatility         DOUBLE,
+            avg_vwap           DOUBLE,
+            avg_pct_change     DOUBLE,
+            buy_pressure       DOUBLE,
+            bar_count          BIGINT,
+            price_range        DOUBLE,
+            vwap_deviation_pct DOUBLE,
+            trend_signal       STRING
         )
         STORED AS PARQUET
     """)
