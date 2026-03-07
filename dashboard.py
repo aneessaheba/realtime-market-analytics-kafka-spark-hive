@@ -59,8 +59,10 @@ app.layout = html.Div(
             style={"color": "#e0e0e0", "textAlign": "center"}
         ),
         html.Div(id="signal-badges", style={"textAlign": "center", "marginBottom": "20px"}),
-        dcc.Graph(id="price-chart",      style={"marginBottom": "20px"}),
-        dcc.Graph(id="volatility-chart", style={"marginBottom": "20px"}),
+        dcc.Graph(id="price-chart",       style={"marginBottom": "20px"}),
+        dcc.Graph(id="ohlc-chart",        style={"marginBottom": "20px"}),
+        dcc.Graph(id="buy-pressure-chart",style={"marginBottom": "20px"}),
+        dcc.Graph(id="volatility-chart",  style={"marginBottom": "20px"}),
         dcc.Graph(id="volume-chart"),
         dcc.Interval(id="interval", interval=5000, n_intervals=0),
     ],
@@ -92,27 +94,31 @@ def base_layout(title, xaxis_title, yaxis_title):
 
 
 @app.callback(
-    Output("signal-badges",   "children"),
-    Output("price-chart",     "figure"),
-    Output("volatility-chart","figure"),
-    Output("volume-chart",    "figure"),
-    Input("interval",         "n_intervals"),
+    Output("signal-badges",    "children"),
+    Output("price-chart",      "figure"),
+    Output("ohlc-chart",       "figure"),
+    Output("buy-pressure-chart","figure"),
+    Output("volatility-chart", "figure"),
+    Output("volume-chart",     "figure"),
+    Input("interval",          "n_intervals"),
 )
 def update_dashboard(_):
     snapshot = get_snapshot()
 
     if not snapshot:
         empty = empty_figure()
-        return [], empty, empty, empty
+        return [], empty, empty, empty, empty, empty
 
+    # --- Signal badges ---
     badges = []
     for sym, recs in snapshot.items():
         if recs:
             latest = recs[-1]
             signal = latest.get("trend_signal", "NEUTRAL")
             color  = SIGNAL_COLORS.get(signal, "#636efa")
+            bp     = latest.get("buy_pressure", 0)
             badges.append(html.Span(
-                f" {sym}: {signal} (${latest.get('avg_close', 0):.2f}) ",
+                f" {sym}: {signal} | ${latest.get('avg_close', 0):.2f} | BP {bp:.0%} ",
                 style={
                     "backgroundColor": color,
                     "color": "white",
@@ -124,6 +130,7 @@ def update_dashboard(_):
                 },
             ))
 
+    # --- Avg close price line chart ---
     price_fig = go.Figure()
     for sym, recs in snapshot.items():
         if recs:
@@ -136,6 +143,42 @@ def update_dashboard(_):
         "Average Close Price per Window", "Window", "Price (USD)"
     ))
 
+    # --- OHLC box chart using min/avg/max close per window ---
+    ohlc_fig = go.Figure()
+    for sym, recs in snapshot.items():
+        if recs:
+            df = pd.DataFrame(recs)
+            ohlc_fig.add_trace(go.Box(
+                name=sym,
+                q1=df["min_close"],
+                median=df["avg_close"],
+                q3=df["max_close"],
+                lowerfence=df["min_close"],
+                upperfence=df["max_close"],
+                mean=df["avg_close"],
+                showlegend=True,
+            ))
+    ohlc_fig.update_layout(**base_layout(
+        "Price Range per Window (min / avg / max close)", "Symbol", "Price (USD)"
+    ))
+
+    # --- Buy pressure chart ---
+    bp_fig = go.Figure()
+    for sym, recs in snapshot.items():
+        if recs:
+            df = pd.DataFrame(recs)
+            if "buy_pressure" in df.columns:
+                bp_fig.add_trace(go.Scatter(
+                    x=df["window_start"], y=df["buy_pressure"] * 100,
+                    mode="lines+markers", name=sym, line={"width": 2},
+                ))
+    bp_fig.add_hline(y=50, line_dash="dot", line_color="gray",
+                     annotation_text="50% neutral", annotation_position="bottom right")
+    bp_fig.update_layout(**base_layout(
+        "Buy Pressure % per Window (>50% = more up-ticks)", "Window", "Buy Pressure (%)"
+    ))
+
+    # --- Volatility bar chart ---
     vol_fig = go.Figure()
     for sym, recs in snapshot.items():
         if recs:
@@ -147,6 +190,7 @@ def update_dashboard(_):
         "Price Volatility (StdDev) per Window", "Window", "Volatility"
     ))
 
+    # --- Average volume line chart ---
     volume_fig = go.Figure()
     for sym, recs in snapshot.items():
         if recs:
@@ -160,7 +204,7 @@ def update_dashboard(_):
         "Average Volume per Window", "Window", "Volume"
     ))
 
-    return badges, price_fig, vol_fig, volume_fig
+    return badges, price_fig, ohlc_fig, bp_fig, vol_fig, volume_fig
 
 
 def main():
