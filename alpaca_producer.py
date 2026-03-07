@@ -1,21 +1,41 @@
 import json
+import logging
+import os
+import time
 from datetime import datetime
+
 from alpaca.data.live import StockDataStream
+from dotenv import load_dotenv
 from kafka import KafkaProducer
 
-API_KEY = "YOUR_API_KEY"
-API_SECRET = "YOUR_API_SECRET"
+load_dotenv()
 
-SYMBOLS = ["AAPL", "TSLA", "GOOGL", "MSFT", "AMZN"]
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+log = logging.getLogger(__name__)
 
-KAFKA_BROKER = "localhost:29092"
+API_KEY    = os.environ.get("ALPACA_API_KEY",    "YOUR_API_KEY")
+API_SECRET = os.environ.get("ALPACA_API_SECRET", "YOUR_API_SECRET")
+
+KAFKA_BROKER = os.environ.get("KAFKA_BROKER", "localhost:29092")
 KAFKA_TOPIC  = "alpaca_trends"
 
-producer = KafkaProducer(
-    bootstrap_servers=KAFKA_BROKER,
-    value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-    key_serializer=lambda k: k.encode("utf-8"),
-)
+_symbols_env = os.environ.get("SYMBOLS", "AAPL,TSLA,GOOGL,MSFT,AMZN")
+SYMBOLS = [s.strip() for s in _symbols_env.split(",") if s.strip()]
+
+RETRY_DELAY = 10   # seconds between reconnect attempts
+MAX_RETRIES = 5
+
+
+def make_producer():
+    return KafkaProducer(
+        bootstrap_servers=KAFKA_BROKER,
+        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+        key_serializer=lambda k: k.encode("utf-8"),
+    )
+
 
 def preprocess_bar(bar):
     try:
@@ -57,7 +77,7 @@ def preprocess_bar(bar):
         return clean_record
 
     except Exception as e:
-        print("Preprocessing error:", e)
+        log.error("Preprocessing error: %s", e)
         return None
 
 
@@ -65,27 +85,43 @@ async def handle_bar(bar):
     record = preprocess_bar(bar)
 
     if record:
-        print(f"[{record['symbol']}] close={record['close']} "
-              f"| change={record['pct_change']:+.2f}% "
-              f"| dir={record['direction']} "
-              f"| vol={record['volume']:,}")
-
+        log.info(
+            "[%s] close=%.2f | change=%+.2f%% | dir=%s | vol=%s",
+            record["symbol"], record["close"],
+            record["pct_change"], record["direction"],
+            f"{record['volume']:,}",
+        )
         producer.send(KAFKA_TOPIC, key=record["symbol"], value=record)
         producer.flush()
 
 
 def main():
-    print(f"Starting Alpaca real-time stream for: {SYMBOLS}")
-    print(f"Publishing to Kafka topic: {KAFKA_TOPIC}")
+    global producer
+    log.info("Starting Alpaca real-time stream for: %s", SYMBOLS)
+    log.info("Publishing to Kafka topic: %s on broker %s", KAFKA_TOPIC, KAFKA_BROKER)
 
-    stream = StockDataStream(API_KEY, API_SECRET)
-    stream.subscribe_bars(handle_bar, *SYMBOLS)
+    producer = make_producer()
 
-    try:
-        stream.run()
-    except KeyboardInterrupt:
-        print("Stream stopped.")
-        producer.close()
+    attempt = 0
+    while True:
+        try:
+            attempt += 1
+            log.info("Stream attempt %d …", attempt)
+            stream = StockDataStream(API_KEY, API_SECRET)
+            stream.subscribe_bars(handle_bar, *SYMBOLS)
+            stream.run()
+        except KeyboardInterrupt:
+            log.info("Stream stopped by user.")
+            producer.close()
+            break
+        except Exception as exc:
+            log.warning("Stream error: %s", exc)
+            if MAX_RETRIES and attempt >= MAX_RETRIES:
+                log.error("Max retries (%d) reached. Exiting.", MAX_RETRIES)
+                producer.close()
+                break
+            log.info("Reconnecting in %ds …", RETRY_DELAY)
+            time.sleep(RETRY_DELAY)
 
 
 if __name__ == "__main__":
