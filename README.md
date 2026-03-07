@@ -519,3 +519,123 @@ source venv/bin/activate && python mock_producer.py
 source venv/bin/activate && python dashboard.py
 # → open http://localhost:8050
 ```
+
+---
+
+## 9. Hive Queries & Monitoring
+
+### 9.1 Connect to HiveServer2 with Beeline
+
+```bash
+docker exec -it hive-server /opt/hive/bin/beeline \
+  -u jdbc:hive2://localhost:10000/default
+```
+
+### 9.2 Useful Hive Queries
+
+**Check the table schema:**
+```sql
+DESCRIBE default.stock_trends;
+```
+
+**View the most recent trend windows:**
+```sql
+SELECT symbol, window_start, window_end,
+       avg_close, trend_signal, buy_pressure, volatility
+FROM default.stock_trends
+ORDER BY window_start DESC
+LIMIT 20;
+```
+
+**Most bullish symbol in the last hour:**
+```sql
+SELECT symbol,
+       COUNT(*) AS bullish_windows,
+       ROUND(AVG(avg_close), 2) AS mean_price,
+       ROUND(AVG(buy_pressure) * 100, 1) AS avg_buy_pressure_pct
+FROM default.stock_trends
+WHERE trend_signal = 'BULLISH'
+  AND window_start >= DATE_SUB(CURRENT_TIMESTAMP, 1)
+GROUP BY symbol
+ORDER BY bullish_windows DESC;
+```
+
+**Volatility comparison across symbols:**
+```sql
+SELECT symbol,
+       ROUND(AVG(volatility), 4)   AS avg_volatility,
+       ROUND(MAX(volatility), 4)   AS peak_volatility,
+       ROUND(AVG(price_range), 4)  AS avg_price_range
+FROM default.stock_trends
+GROUP BY symbol
+ORDER BY avg_volatility DESC;
+```
+
+**VWAP deviation over time (how far price drifted from fair value):**
+```sql
+SELECT symbol, window_start,
+       ROUND(vwap_deviation_pct, 3) AS vwap_dev,
+       trend_signal
+FROM default.stock_trends
+WHERE ABS(vwap_deviation_pct) > 0.1
+ORDER BY ABS(vwap_deviation_pct) DESC
+LIMIT 30;
+```
+
+**Count records stored (sanity check):**
+```sql
+SELECT symbol, COUNT(*) AS window_count
+FROM default.stock_trends
+GROUP BY symbol;
+```
+
+### 9.3 Check HDFS Parquet Files
+
+```bash
+# List files in the Hive warehouse
+docker exec -it namenode hdfs dfs -ls /user/hive/warehouse/stock_trends/
+
+# Check total size
+docker exec -it namenode hdfs dfs -du -s -h /user/hive/warehouse/stock_trends/
+```
+
+### 9.4 Spark Streaming Monitoring
+
+The Spark Master UI at **http://localhost:8080** shows:
+- Running streaming jobs and their status
+- Executor memory and CPU usage
+- Processing time per micro-batch
+
+In the Spark driver logs, each micro-batch prints a summary table to console showing the computed trend windows. You can also track streaming metrics via:
+
+```bash
+# Follow Spark driver logs
+docker logs -f spark-master
+```
+
+### 9.5 Kafka Topic Inspection
+
+```bash
+# List all topics
+docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 --list
+
+# Read raw messages from input topic
+docker exec -it kafka kafka-console-consumer \
+  --bootstrap-server localhost:9092 \
+  --topic alpaca_trends \
+  --from-beginning \
+  --max-messages 5
+
+# Read Spark output (trend results)
+docker exec -it kafka kafka-console-consumer \
+  --bootstrap-server localhost:9092 \
+  --topic alpaca_trend_results \
+  --from-beginning \
+  --max-messages 5
+
+# Check lag (how far behind consumers are)
+docker exec -it kafka kafka-consumer-groups \
+  --bootstrap-server localhost:9092 \
+  --describe \
+  --group dashboard_group
+```
