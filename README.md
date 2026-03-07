@@ -639,3 +639,186 @@ docker exec -it kafka kafka-consumer-groups \
   --describe \
   --group dashboard_group
 ```
+
+---
+
+## 10. Technical Difficulties & Best Practices
+
+This section documents every significant obstacle encountered during development and what was learned from each.
+
+---
+
+### 10.1 Hive Metastore Startup Failure
+
+**Problem:** The `hive-metastore` container repeatedly restarted with errors like:
+```
+MetaException: Version information not found in metastore
+```
+or:
+```
+Unable to connect to JDBC metastore: hive-metastore-postgresql
+```
+
+**Root cause:** Two independent issues:
+1. The `hive-metastore` container started before Postgres finished initialising its database schema.
+2. The default Docker Hive image tries to use environment variables to configure the metastore, but the variable injection mechanism in older `bde2020/hive` images is broken for some settings.
+
+**Solution:**
+- Added `SERVICE_PRECONDITION: "namenode:50070 hive-metastore-postgresql:5432"` to the metastore service so it polls until both dependencies are actually listening on their ports before starting.
+- Replaced environment variable-based Hive config entirely with a hand-crafted `hive-site.xml` bind-mounted into the container. This guarantees exact configuration regardless of image quirks.
+
+**Best practice:** Never rely on Docker `depends_on` alone for services that need readiness checks. Use `SERVICE_PRECONDITION` or a health-check + `condition: service_healthy` in Compose to enforce actual readiness rather than just container-started state.
+
+---
+
+### 10.2 Kafka Listener Configuration — Two Listeners Required
+
+**Problem:** Spark (running inside Docker) could not connect to Kafka, even though the host-machine producer worked fine. Error:
+```
+org.apache.kafka.common.errors.TimeoutException: Expiring 1 record(s) for alpaca_trends
+```
+
+**Root cause:** Kafka advertises its address to clients after they connect. When only `localhost:29092` was configured, Kafka advertised `localhost` to Spark — but inside Docker, `localhost` resolves to the Spark container itself, not the Kafka container.
+
+**Solution:** Two separate listeners:
+```
+PLAINTEXT://kafka:9092           ← Docker-internal: "kafka" resolves via Docker DNS
+PLAINTEXT_HOST://localhost:29092 ← Host machine: reaches Kafka via port mapping
+```
+Spark uses `kafka:9092`; the Python producers and dashboard use `localhost:29092`.
+
+**Best practice:** When mixing host-machine and container clients for Kafka, always configure two listener protocols with distinct advertised addresses. Name them clearly (`PLAINTEXT` vs `PLAINTEXT_HOST`).
+
+---
+
+### 10.3 HDFS Directory Permissions for Hive
+
+**Problem:** Spark's first write to the Hive warehouse failed:
+```
+org.apache.hadoop.security.AccessControlException: Permission denied:
+user=root, access=WRITE, inode="/user/hive/warehouse"
+```
+
+**Root cause:** The HDFS `/user/hive/warehouse` directory did not exist. When `hive-server` tried to create it, the HDFS default umask prevented world-writable directories. Spark ran as `root` but the directory was owned by `hive`.
+
+**Solution:** Added a dedicated `hdfs-init` one-shot container to the Docker Compose stack. It runs only once after the NameNode and DataNode are ready, creates the required directories, and sets permissions to `777`:
+```bash
+hdfs dfs -mkdir -p /user/hive/warehouse
+hdfs dfs -chmod -R 777 /user/hive/warehouse
+```
+
+**Best practice:** Always initialise HDFS directories with explicit permissions before writing to them. In production, use proper POSIX ACLs or Ranger policies instead of `777`.
+
+---
+
+### 10.4 Hive DDL Type Mismatch — `LONG` vs `BIGINT`
+
+**Problem:** The Hive `CREATE TABLE` statement used `LONG` as the data type for `bar_count`:
+```sql
+bar_count LONG
+```
+This caused a `ParseException` when Hive executed the DDL. `LONG` is a Java primitive but is **not a valid Hive type**.
+
+**Solution:** Replaced with the correct Hive type:
+```sql
+bar_count BIGINT
+```
+
+**Best practice:** Hive's type system differs from Java's and Spark's. Always validate DDL statements directly in Beeline during development before embedding them in code.
+
+---
+
+### 10.5 Spark Kafka Connector JAR Not Bundled
+
+**Problem:** Submitting `spark_trend_analyzer.py` failed immediately:
+```
+java.lang.ClassNotFoundException: org.apache.spark.sql.kafka010.KafkaSourceProvider
+```
+
+**Root cause:** The `apache/spark:3.5.0` base image does not include the Kafka structured-streaming connector. It must be provided separately.
+
+**Solution:** Use `--packages` on the `spark-submit` command:
+```bash
+--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0
+```
+Spark downloads the JAR from Maven Central on first run and caches it.
+
+**Best practice:** For repeatable deployments, pre-download the JAR and mount it into the container, or build a custom Spark Docker image with the JAR pre-installed. Relying on Maven Central download at runtime introduces an external dependency that can fail.
+
+---
+
+### 10.6 Spark Structured Streaming Output Mode Constraints
+
+**Problem:** Using `outputMode("complete")` with the Kafka and Hive sinks raised:
+```
+AnalysisException: Complete output mode not supported when there are no streaming aggregations
+```
+or silently wrote duplicate data.
+
+**Root cause:** `complete` mode re-emits all rows every micro-batch. With Kafka and Parquet sinks, this causes unbounded Kafka message growth and Parquet file duplication. `update` mode only re-emits changed rows, which is what we want for streaming aggregations.
+
+**Solution:**
+- Kafka sink: `outputMode("update")` — only changed windows are re-published
+- Hive/Parquet sink: `outputMode("append")` with a watermark — only finalised (past the watermark) windows are written, preventing overwrites
+
+**Best practice:** Match output mode carefully to the sink semantics. `update` is generally correct for Kafka; `append` (with watermark) is correct for storage sinks to avoid duplicates.
+
+---
+
+### 10.7 Watermark Tuning for Late Data
+
+**Problem:** Early in testing, some bars arrived slightly late (network jitter from the Alpaca WebSocket), and those bars were silently dropped by Spark rather than included in their window.
+
+**Root cause:** The watermark was initially set to 0 (no late tolerance). Any event with an `event_time` more than 0 seconds behind the watermark was discarded.
+
+**Solution:** Increased watermark to 2 minutes:
+```python
+df.withWatermark("event_time", "2 minutes")
+```
+This allows events arriving up to 2 minutes late to still be included in their correct window.
+
+**Best practice:** Set watermark based on observed end-to-end latency in your environment. Too tight → data loss. Too loose → state accumulates in memory and checkpoints grow large. 2 minutes is a safe starting point for low-latency WebSocket sources.
+
+---
+
+### 10.8 API Keys in Source Code
+
+**Problem:** Initial versions of `alpaca_producer.py` hardcoded credentials:
+```python
+API_KEY = "PK..."
+API_SECRET = "..."
+```
+Committing this to a public GitHub repository would expose the credentials to anyone who views the repo, and revoke them immediately via GitHub's secret scanning.
+
+**Solution:**
+- Moved all secrets to `.env` (listed in `.gitignore`)
+- Added `.env.example` with placeholder values so contributors know what variables are needed
+- Use `python-dotenv` to load them at runtime
+
+**Best practice:** Never hardcode credentials in source code. Use environment variables, a secrets manager, or a `.env` file that is explicitly excluded from version control. Rotate any key that was ever committed, even briefly.
+
+---
+
+### 10.9 Docker Resource Limits on macOS
+
+**Problem:** Docker Desktop on macOS defaulted to 2 GB RAM, causing the NameNode, HiveServer2, and Spark containers to OOM-kill each other.
+
+**Solution:** In Docker Desktop → Settings → Resources, increase RAM to at least **12 GB** and CPUs to **4**. The full stack comfortably fits in 10–12 GB.
+
+**Best practice:** Always document minimum resource requirements for containerised big data stacks. For lighter development, run only the services you need:
+```bash
+docker compose up -d zookeeper kafka  # just Kafka
+docker compose up -d namenode datanode hdfs-init  # just HDFS
+```
+
+---
+
+### 10.10 Alpaca WebSocket Connection Drops During Market Hours
+
+**Problem:** The Alpaca WebSocket stream occasionally disconnected after 30–60 minutes with no error, silently stopping data flow.
+
+**Root cause:** Alpaca's streaming infrastructure closes idle or stale connections. If the local network has NAT timeout rules shorter than Alpaca's keepalive interval, the connection drops silently.
+
+**Solution:** Added an outer retry loop in `alpaca_producer.py` that catches any exception from `stream.run()` and reconnects after a `RETRY_DELAY` (default 10 seconds), up to `MAX_RETRIES` attempts.
+
+**Best practice:** All persistent WebSocket/streaming connections in production should have reconnection logic. Treat connection loss as a normal event, not an error condition.
