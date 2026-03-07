@@ -138,7 +138,7 @@ def ensure_hive_table(spark):
             min_close    DOUBLE,
             avg_volume   DOUBLE,
             volatility   DOUBLE,
-            bar_count    LONG,
+            bar_count    BIGINT,
             price_range  DOUBLE,
             trend_signal STRING
         )
