@@ -15,10 +15,11 @@
 6. [Setup & Prerequisites](#6-setup--prerequisites)
 7. [Configuration](#7-configuration)
 8. [Running the Pipeline](#8-running-the-pipeline)
-9. [Hive Queries & Monitoring](#9-hive-queries--monitoring)
-10. [Technical Difficulties & Best Practices](#10-technical-difficulties--best-practices)
-11. [Learning Summary & Reflections](#11-learning-summary--reflections)
-12. [Future Improvements](#12-future-improvements)
+9. [Dashboard Screenshots](#9-dashboard-screenshots)
+10. [Hive Queries & Monitoring](#10-hive-queries--monitoring)
+11. [Technical Difficulties & Best Practices](#11-technical-difficulties--best-practices)
+12. [Learning Summary & Reflections](#12-learning-summary--reflections)
+13. [Future Improvements](#13-future-improvements)
 
 ---
 
@@ -522,16 +523,62 @@ source venv/bin/activate && python dashboard.py
 
 ---
 
-## 9. Hive Queries & Monitoring
+## 9. Dashboard Screenshots
 
-### 9.1 Connect to HiveServer2 with Beeline
+The Plotly-Dash dashboard runs at **http://localhost:8050** and auto-refreshes every 5 seconds. Below are screenshots captured from a live pipeline run using the mock producer.
+
+### Full Dashboard
+
+![Full Dashboard](screenshots/dashboard_00_full.png)
+
+### Trend Signal Badges
+
+Real-time BULLISH / BEARISH / NEUTRAL signal per symbol with current average close price and buy pressure percentage.
+
+![Signal Badges](screenshots/dashboard_01_signal_badges.png)
+
+### Average Close Price per Window
+
+Line chart showing the average close price across all 5-minute sliding windows for each symbol.
+
+![Average Close Price](screenshots/dashboard_02_avg_close_price.png)
+
+### Price Range per Window (min / avg / max close)
+
+Box chart showing the spread between minimum, average, and maximum close prices within each window.
+
+![Price Range](screenshots/dashboard_03_price_range.png)
+
+### Buy Pressure % per Window
+
+Percentage of up-tick bars per window. Above the 50% dotted line indicates sustained buying momentum.
+
+![Buy Pressure](screenshots/dashboard_04_buy_pressure.png)
+
+### Price Volatility (StdDev) per Window
+
+Grouped bar chart of close-price standard deviation per symbol per window — higher bars indicate more volatile price action.
+
+![Volatility](screenshots/dashboard_05_volatility.png)
+
+### Average Volume per Window
+
+Dotted line chart of average trading volume per symbol, reflecting market participation intensity.
+
+![Average Volume](screenshots/dashboard_06_avg_volume.png)
+
+---
+
+## 10. Hive Queries & Monitoring
+
+### 10.1 Connect to HiveServer2 with Beeline
 
 ```bash
 docker exec -it hive-server /opt/hive/bin/beeline \
   -u jdbc:hive2://localhost:10000/default
 ```
 
-### 9.2 Useful Hive Queries
+### 10.2 Useful Hive Queries
 
 **Check the table schema:**
 ```sql
@@ -589,7 +636,7 @@ FROM default.stock_trends
 GROUP BY symbol;
 ```
 
-### 9.3 Check HDFS Parquet Files
+### 10.3 Check HDFS Parquet Files
 
 ```bash
 # List files in the Hive warehouse
@@ -599,7 +646,7 @@ docker exec -it namenode hdfs dfs -ls /user/hive/warehouse/stock_trends/
 docker exec -it namenode hdfs dfs -du -s -h /user/hive/warehouse/stock_trends/
 ```
 
-### 9.4 Spark Streaming Monitoring
+### 10.4 Spark Streaming Monitoring
 
 The Spark Master UI at **http://localhost:8080** shows:
 - Running streaming jobs and their status
@@ -613,7 +660,7 @@ In the Spark driver logs, each micro-batch prints a summary table to console sho
 docker logs -f spark-master
 ```
 
-### 9.5 Kafka Topic Inspection
+### 10.5 Kafka Topic Inspection
 
 ```bash
 # List all topics
@@ -642,13 +689,13 @@ docker exec -it kafka kafka-consumer-groups \
 
 ---
 
-## 10. Technical Difficulties & Best Practices
+## 11. Technical Difficulties & Best Practices
 
 This section documents every significant obstacle encountered during development and what was learned from each.
 
 ---
 
-### 10.1 Hive Metastore Startup Failure
+### 11.1 Hive Metastore Startup Failure
 
 **Problem:** The `hive-metastore` container repeatedly restarted with errors like:
 ```
@@ -671,7 +718,7 @@ Unable to connect to JDBC metastore: hive-metastore-postgresql
 
 ---
 
-### 10.2 Kafka Listener Configuration — Two Listeners Required
+### 11.2 Kafka Listener Configuration — Two Listeners Required
 
 **Problem:** Spark (running inside Docker) could not connect to Kafka, even though the host-machine producer worked fine. Error:
 ```
@@ -691,7 +738,7 @@ Spark uses `kafka:9092`; the Python producers and dashboard use `localhost:29092
 
 ---
 
-### 10.3 HDFS Directory Permissions for Hive
+### 11.3 HDFS Directory Permissions for Hive
 
 **Problem:** Spark's first write to the Hive warehouse failed:
 ```
@@ -711,7 +758,7 @@ hdfs dfs -chmod -R 777 /user/hive/warehouse
 
 ---
 
-### 10.4 Hive DDL Type Mismatch — `LONG` vs `BIGINT`
+### 11.4 Hive DDL Type Mismatch — `LONG` vs `BIGINT`
 
 **Problem:** The Hive `CREATE TABLE` statement used `LONG` as the data type for `bar_count`:
 ```sql
@@ -728,7 +775,7 @@ bar_count BIGINT
 
 ---
 
-### 10.5 Spark Kafka Connector JAR Not Bundled
+### 11.5 Spark Kafka Connector JAR Not Bundled
 
 **Problem:** Submitting `spark_trend_analyzer.py` failed immediately:
 ```
@@ -747,7 +794,7 @@ Spark downloads the JAR from Maven Central on first run and caches it.
 
 ---
 
-### 10.6 Spark Structured Streaming Output Mode Constraints
+### 11.6 Spark Structured Streaming Output Mode Constraints
 
 **Problem:** Using `outputMode("complete")` with the Kafka and Hive sinks raised:
 ```
@@ -765,7 +812,7 @@ or silently wrote duplicate data.
 
 ---
 
-### 10.7 Watermark Tuning for Late Data
+### 11.7 Watermark Tuning for Late Data
 
 **Problem:** Early in testing, some bars arrived slightly late (network jitter from the Alpaca WebSocket), and those bars were silently dropped by Spark rather than included in their window.
 
@@ -781,7 +828,7 @@ This allows events arriving up to 2 minutes late to still be included in their c
 
 ---
 
-### 10.8 API Keys in Source Code
+### 11.8 API Keys in Source Code
 
 **Problem:** Initial versions of `alpaca_producer.py` hardcoded credentials:
 ```python
@@ -799,7 +846,7 @@ Committing this to a public GitHub repository would expose the credentials to an
 
 ---
 
-### 10.9 Docker Resource Limits on macOS
+### 11.9 Docker Resource Limits on macOS
 
 **Problem:** Docker Desktop on macOS defaulted to 2 GB RAM, causing the NameNode, HiveServer2, and Spark containers to OOM-kill each other.
 
@@ -813,7 +860,7 @@ docker compose up -d namenode datanode hdfs-init  # just HDFS
 
 ---
 
-### 10.10 Alpaca WebSocket Connection Drops During Market Hours
+### 11.10 Alpaca WebSocket Connection Drops During Market Hours
 
 **Problem:** The Alpaca WebSocket stream occasionally disconnected after 30–60 minutes with no error, silently stopping data flow.
 
@@ -825,9 +872,9 @@ docker compose up -d namenode datanode hdfs-init  # just HDFS
 
 ---
 
-## 11. Learning Summary & Reflections
+## 12. Learning Summary & Reflections
 
-### 11.1 What We Learned
+### 12.1 What We Learned
 
 **Apache Kafka**
 Kafka is not just a message queue — it is a distributed, durable, ordered log. The key insight is that Kafka topics can serve simultaneously as a pipeline transport (producer → Spark) and as a real-time API (Spark → dashboard). The decoupling this provides is profound: the dashboard does not need to know about Spark at all; it just reads from a topic. We also learned that Kafka's partitioning strategy is critical for Spark — keying messages by symbol ensures Spark can consume each symbol's stream in order, which matters for accurate window computations.
@@ -846,7 +893,7 @@ Dash bridges the gap between Python data processing and interactive web dashboar
 
 ---
 
-### 11.2 Challenges Faced
+### 12.2 Challenges Faced
 
 | Challenge | Impact | Resolution |
 |---|---|---|
@@ -863,7 +910,7 @@ Dash bridges the gap between Python data processing and interactive web dashboar
 
 ---
 
-### 11.3 Insights Gained
+### 12.3 Insights Gained
 
 **On streaming vs. batch:**
 Real-time streaming is fundamentally harder than batch processing because you cannot see the full dataset before computing. Windowing, watermarks, and output modes are all compensations for this fundamental uncertainty. Batch processing's luxury of global knowledge is entirely absent in streaming.
@@ -882,7 +929,7 @@ The `buy_pressure` metric (fraction of up-ticks) proved surprisingly informative
 
 ---
 
-## 12. Future Improvements
+## 13. Future Improvements
 
 | Feature | Description | Priority |
 |---|---|---|
